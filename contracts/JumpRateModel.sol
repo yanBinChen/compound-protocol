@@ -117,7 +117,8 @@ contract JumpRateModel is InterestRateModel {
     ) public view override returns (uint) {
         // borrows / (cash + borrows - reserves)
         uint util = utilizationRate(cash, borrows, reserves);
-
+        
+        // 基于资金利用率计算贷款利率，下面两个分支对应两段式利率模型
         if (util <= kink) {
             // 利用率低于拐点
             // multiplierPerBlock和util都有BASE这个因子，所以这里需要除一个因子
