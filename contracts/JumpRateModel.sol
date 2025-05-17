@@ -98,7 +98,7 @@ contract JumpRateModel is InterestRateModel {
         if (borrows == 0) {
             return 0;
         }
-        
+
         // 因为solidity 不支持小数，所以分子需要乘以BASE
         return (borrows * BASE) / (cash + borrows - reserves);
     }
@@ -118,7 +118,8 @@ contract JumpRateModel is InterestRateModel {
         // borrows / (cash + borrows - reserves)
         uint util = utilizationRate(cash, borrows, reserves);
 
-        if (util <= kink) { // 利用率低于拐点
+        if (util <= kink) {
+            // 利用率低于拐点
             // multiplierPerBlock和util都有BASE这个因子，所以这里需要除一个因子
             return ((util * multiplierPerBlock) / BASE) + baseRatePerBlock;
         } else {
