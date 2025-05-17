@@ -3,6 +3,21 @@ pragma solidity ^0.8.10;
 
 import "./GovernorBravoInterfaces.sol";
 
+// GovernorBravo 是 Compound V2 协议的链上治理合约，用于管理协议的升级和参数调整。
+// 全称：Governor Bravo Delegate，是 Compound 的第二代治理机制（改进自 Governor Alpha）。
+// 作用：允许 COMP 代币持有者提出、投票和执行治理提案，例如更新利率模型。对投票参与数量，赞成数量等有限制，保证提案的有效性
+// 投票通过的提案，会加入 Timelock 队列（延迟 2 天，）。Timelock 
+// GovernorBravo 是 Timelock 合约的 admin，
+// 即只有 GovernorBravo 可以通过投票调用 Timelock 的 queueTransaction 和 executeTransaction 函数。
+// 提案通过后，GovernorBravo 将操作（比如更新利率模型操作）推送到 Timelock 队列，确保延迟执行和社区审查
+// cToken 的 admin 指向 Timelock 合约，因为投票通过的提案会进入到Timelock，延后 xxx 天后，任何人调用
+// Timelock.executeTransaction 执行提案
+
+// GovernorBravo 分为两部分：
+// GovernorBravoDelegate：包含治理逻辑（提案、投票、执行）。
+// GovernorBravoDelegator：代理合约，持有状态（如提案记录、投票数据），通过代理模式（EIP-897）调用 Delegate 的逻辑。
+// 如果需要更新 GovernorBravo的逻辑，即替换 GovernorBravoDelegate 的实现（例如，从 v2 到 v3）即可
+// 而 Delegator 的地址可以保持不变（0xc0Da02939E1441F497fd74F78cE7Decb17B66529）。
 contract GovernorBravoDelegate is GovernorBravoDelegateStorageV2, GovernorBravoEvents {
 
     /// @notice The name of this contract
