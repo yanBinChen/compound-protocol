@@ -67,7 +67,7 @@ contract CErc20 is CToken, CErc20Interface {
      * @param redeemTokens The number of cTokens to redeem into underlying
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
-    // 取款，CToken -> Token 的过程，
+    // 取款，CToken -> Token 的过程，指定了需要卖出多少个CToken
     function redeem(uint redeemTokens) external override returns (uint) {
         redeemInternal(redeemTokens);
         return NO_ERROR;
@@ -79,6 +79,7 @@ contract CErc20 is CToken, CErc20Interface {
      * @param redeemAmount The amount of underlying to redeem
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    // 取款，CToken -> Token 的过程，操作完成之后，账户的Token数量会增加redeemAmount个Token
     function redeemUnderlying(
         uint redeemAmount
     ) external override returns (uint) {
@@ -91,6 +92,7 @@ contract CErc20 is CToken, CErc20Interface {
      * @param borrowAmount The amount of the underlying asset to borrow
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    //  贷款，借borrowAmount个Token
     function borrow(uint borrowAmount) external override returns (uint) {
         borrowInternal(borrowAmount);
         return NO_ERROR;
@@ -184,6 +186,12 @@ contract CErc20 is CToken, CErc20Interface {
      *      Note: This wrapper safely handles non-standard ERC-20 tokens that do not return a value.
      *            See here: https://medium.com/coinmonks/missing-return-value-bug-at-least-130-tokens-affected-d67bf08521ca
      */
+    //  对于CUSDT而言，underlying是USDT。token = EIP20NonStandardInterface(underlying_) 这个意味着后续操作的都是USDT合约
+    // EIP20Interface(underlying_).balanceOf(address(this)），统计的是USDT合约中，CUSDT地址的USDT余额
+    // token.transferFrom(from, address(this), amount); 执行的事USDT合约的transferFrom代码逻辑
+    // USDT合约将从 from 地址(往CUSDT合约存入资金的账户地址) 转账 amount 个 USDT 到 CUSDT合约地址
+    // 以此对应，当你redeem的时候，USDT合约会从CUSDT合约地址转指定数量的USDT到你的账户地址
+    // 这里需要搞清楚的事: USDT本身是个合约，它在ETH上有独立的地址，它也有自己的合约代码。所有账户的USDT余额信息都是记录在USDT合约内部的状态变量中
     function doTransferIn(
         address from,
         uint amount
@@ -192,6 +200,14 @@ contract CErc20 is CToken, CErc20Interface {
         address underlying_ = underlying;
         // 使用 EIP20NonStandardInterface 而不是标准 EIP20Interface，
         // 因为 Compound 设计时考虑了非标准 ERC-20 代币（某些代币可能不返回 bool 值或有非标准行为）。
+        // 通过将 underlying_ 地址转换为 EIP20NonStandardInterface 接口，
+        // 代码可以在运行时调用不同代币合约的 transferFrom 函数逻辑，具体取决于 underlying_ 的实际值。
+        // 这种设计允许 Compound 协议以统一的方式与多种 ERC-20 代币（或类似 USDT 的非标准代币）交互。
+        // 表现出类似 C++ 中多态的特性
+
+        // EIP20NonStandardInterface 是一个抽象接口，不包含具体实现，仅定义函数签名。
+        // 通过 EIP20NonStandardInterface(underlying_)，Solidity 将 underlying_ 地址“绑定”为该接口类型，允许后续通过 token 调用接口定义的函数。
+        // 实际执行的逻辑取决于 underlying_ 指向的合约（例如 USDT、DAI 或其他代币合约）。
         EIP20NonStandardInterface token = EIP20NonStandardInterface(
             underlying_
         );
@@ -199,9 +215,15 @@ contract CErc20 is CToken, CErc20Interface {
         // 当前函数返回值就是用户真正往当前合约转入的资金量
         // 这个是因为转账流程可能会扣除gas费之类的，某些非标准 ERC-20 代币可能转入的金额与请求的 amount 不完全一致（例如因费用或精度问题）。
         // 通过比较前后余额，确保记录的转入量准确，防止错误。
+        // underlying_是USDT，这里获取USDT合约中 CUSDT账户地址的USDT余额
         uint balanceBefore = EIP20Interface(underlying_).balanceOf(
             address(this)
         );
+        // 调用 underlying_ 地址对应合约的 transferFrom 函数，
+        // 将 amount 数量的代币从 from 地址转移到 address(this)（即当前 cToken 合约地址，例如 cUSDT）。
+        // 如果 underlying_ 是 USDT 合约地址，token.transferFrom 调用 USDT 合约的 transferFrom 函数。
+        // 如果 underlying_ 是 DAI 合约地址，调用 DAI 合约的 transferFrom 函数。
+        // 表现出类似 C++ 中多态特点
         token.transferFrom(from, address(this), amount);
 
         bool success;
@@ -214,14 +236,16 @@ contract CErc20 is CToken, CErc20Interface {
             // returndatasize()：返回上一次外部调用（transferFrom）的返回数据大小（以字节为单位）。
             // 根据返回数据大小，决定如何处理：
             switch returndatasize()
-            case 0 { // 无返回值（returndatasize() == 0）
+            case 0 {
+                // 无返回值（returndatasize() == 0）
                 // This is a non-standard ERC-20
                 // 某些非标准 ERC-20 代币（如早期的 USDT）在 transferFrom 成功时不返回任何数据
                 // Compound 假设无返回值表示转账成功，将 success 设为 true（not(0) 在 EVM 中等价于 true）
                 // 这是为了兼容非标准代币的行为。
                 success := not(0) // set success to true
             }
-            case 32 {  // 标准返回值（returndatasize() == 32）
+            case 32 {
+                // 标准返回值（returndatasize() == 32）
                 // This is a compliant ERC-20
                 // 标准 ERC-20 代币的 transferFrom 返回一个 32 字节的 bool 值（true 表示成功，false 表示失败）。
                 // returndatacopy(0, 0, 32)：将返回数据复制到内存位置 0（从返回数据的第 0 字节开始，复制 32 字节）。
@@ -240,7 +264,7 @@ contract CErc20 is CToken, CErc20Interface {
         require(success, "TOKEN_TRANSFER_IN_FAILED");
 
         // Calculate the amount that was *actually* transferred
-        // 获取当前合约的余额
+        // 获取USDT合约中 CUSDT账户地址的USDT余额
         uint balanceAfter = EIP20Interface(underlying_).balanceOf(
             address(this)
         );
@@ -262,6 +286,10 @@ contract CErc20 is CToken, CErc20Interface {
         address payable to,
         uint amount
     ) internal virtual override {
+        // 比如向CUSDT合约贷款1000 USDT，一系列检查通过后，CUSDT合约更新你的贷款总金额(包括累计的利息)
+        // 然后CUSDT合约调用doTransferOut接口，向你的USDT合约账户转账 1000 USDT；
+        // cUSDT合约 调用 USDT 合约的 transfer(yourAddress, 1000e6)：EIP20NonStandardInterface token = EIP20NonStandardInterface(underlying);和token.transfer(to, amount);
+        // 对应USDT 合约会做类似这个的更新：balanceOf[cUSDT] -= 1000e6和balanceOf[yourAddress] += 1000e6
         EIP20NonStandardInterface token = EIP20NonStandardInterface(underlying);
         token.transfer(to, amount);
 

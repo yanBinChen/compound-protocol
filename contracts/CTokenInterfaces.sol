@@ -128,7 +128,8 @@ contract CTokenStorage {
         // 只在借款、还款和用户清算时候更新：new_principal = principal * borrowIndex/interestIndex,
         // 并且将 interestIndex 赋值为当前的borrowIndex
         uint principal; // 贷款总额，包括累计的利息
-        uint interestIndex; // 最近一次的利息系数, 在用户最后一次借款或还款时的值
+        // 最近一次的利息系数, 在用户最后一次借款或还款时的值
+        uint interestIndex; 
     }
 
     // Mapping of account addresses to outstanding borrow balances

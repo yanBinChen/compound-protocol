@@ -84,6 +84,7 @@ abstract contract CToken is
         uint tokens
     ) internal returns (uint) {
         /* Fail if transfer not allowed */
+        // 转账和redeem类似，需要保证转出去之后，src 账户的保证金/抵押品的价值足够
         uint allowed = comptroller.transferAllowed(
             address(this),
             src,
@@ -95,6 +96,7 @@ abstract contract CToken is
         }
 
         /* Do not allow self-transfers */
+        // 边界检查
         if (src == dst) {
             revert TransferNotAllowed();
         }
@@ -599,6 +601,7 @@ abstract contract CToken is
      * @dev Accrues interest whether or not the operation succeeds, unless reverted
      * @param redeemAmount The amount of underlying to receive from redeeming cTokens
      */
+    //  和redeem类似，redeem是指定了需要卖出的CToken数量；这里是指定了希望操作完成后账户的Token余额增加多少
     function redeemUnderlyingInternal(uint redeemAmount) internal nonReentrant {
         accrueInterest();
         // redeemFresh emits redeem-specific logs on errors, so we don't need to
@@ -614,7 +617,8 @@ abstract contract CToken is
      */
     //  赎回资金有两种方式：
     // redeemTokensIn: 本次你想卖多个CToken，最终受到的Token数量为： redeemTokensIn * exchangeRate
-    // redeemAmountIn: 本次你想赎回多少个Token，比如我想赎回1000 个USDT，内部会跟据exchangeRate计算有个从你账户销毁多少个CToken
+    // redeemAmountIn: 本次你想赎回多少个Token，比如我需要1000 个USDT，着急使用，内部会跟据exchangeRate计算有个从你账户销毁多少个CToken
+    // 最终账户的Token数量会增加 redeemAmountIn 个
     // 一次调用只能使用其中一种方式，即redeemTokensIn和redeemAmountIn只能有一个参数的值为非0
     function redeemFresh(
         address payable redeemer,
@@ -631,8 +635,8 @@ abstract contract CToken is
         // 获取最新的CToken的汇率，即一个CToken能换多少个Token
         Exp memory exchangeRate = Exp({mantissa: exchangeRateStoredInternal()});
 
-        uint redeemTokens;
-        uint redeemAmount;
+        uint redeemTokens; // 赎回多少CToken
+        uint redeemAmount; // 最终账户会增加多少Token
         /* If redeemTokensIn > 0: */
         if (redeemTokensIn > 0) {
             /*
@@ -726,6 +730,7 @@ abstract contract CToken is
      * @notice Sender borrows assets from the protocol to their own address
      * @param borrowAmount The amount of the underlying asset to borrow
      */
+    //  贷款，借borrowAmount个Token
     function borrowInternal(uint borrowAmount) internal nonReentrant {
         accrueInterest();
         // borrowFresh emits borrow-specific logs on errors, so we don't need to
@@ -736,8 +741,10 @@ abstract contract CToken is
      * @notice Users borrow assets from the protocol to their own address
      * @param borrowAmount The amount of the underlying asset to borrow
      */
+    //  借款处理函数
     function borrowFresh(address payable borrower, uint borrowAmount) internal {
         /* Fail if borrow not allowed */
+        // 检查用户是否有资格贷款，比如保证金比例检查
         uint allowed = comptroller.borrowAllowed(
             address(this),
             borrower,
@@ -753,6 +760,7 @@ abstract contract CToken is
         }
 
         /* Fail gracefully if protocol has insufficient underlying cash */
+        // 合约本身的资金不够，
         if (getCashPrior() < borrowAmount) {
             revert BorrowCashNotAvailable();
         }
@@ -762,8 +770,12 @@ abstract contract CToken is
          *  accountBorrowNew = accountBorrow + borrowAmount
          *  totalBorrowsNew = totalBorrows + borrowAmount
          */
+        //  先前累计的贷款总额度，Stored 表示使用的是先前更新的 borrowIndex
+        // 因为borrow流程中已经更新过了利息相关参数，这里使用的还是最新的参数累计利息
         uint accountBorrowsPrev = borrowBalanceStoredInternal(borrower);
+        // 贷款总额加上本次贷款的金额
         uint accountBorrowsNew = accountBorrowsPrev + borrowAmount;
+        // 更新协议本身贷出的总资金量
         uint totalBorrowsNew = totalBorrows + borrowAmount;
 
         /////////////////////////
@@ -774,8 +786,10 @@ abstract contract CToken is
          * We write the previously calculated values into storage.
          *  Note: Avoid token reentrancy attacks by writing increased borrow before external transfer.
         `*/
+        // 更新当前贷款账户信息，包括贷款金额和本次的borrowIndex
         accountBorrows[borrower].principal = accountBorrowsNew;
         accountBorrows[borrower].interestIndex = borrowIndex;
+        // 更新合约本身贷款记录
         totalBorrows = totalBorrowsNew;
 
         /*
