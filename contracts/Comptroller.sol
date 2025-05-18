@@ -244,6 +244,7 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
         }
 
         // Keep the flywheel moving
+        // 这部分是Comp 代币相关，后续再看
         updateCompSupplyIndex(cToken);
         distributeSupplierComp(cToken, minter);
 
@@ -291,6 +292,7 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
     }
 
     function redeemAllowedInternal(address cToken, address redeemer, uint redeemTokens) internal view returns (uint) {
+        // 如果这个Token已经下架了则
         if (!markets[cToken].isListed) {
             return uint(Error.MARKET_NOT_LISTED);
         }
@@ -720,6 +722,14 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
                 hypothetical account liquidity in excess of collateral requirements,
      *          hypothetical account shortfall below collateral requirements)
      */
+    //  用于模拟计算某个账户在假设赎回（redeem）一定数量的 cToken 或借入（borrow）一定数量的基础资产后，
+    // 其账户的流动性和潜在的抵押品缺口（shortfall）。该函数不会实际执行任何操作，仅返回假设情况下的账户状态，
+    // 供协议在执行敏感操作（如赎回、借款等）前进行风险评估。
+    // redeemTokens：假设要赎回的 cToken 数量。赎回 cToken 意味着用户将 cToken 换回基础资产（如将 cDAI 换回 DAI），这会减少用户的抵押品。
+    // borrowAmount：假设要借入的基础资产数量（以基础资产的单位计）。借款会增加用户的债务，可能影响账户的流动性。
+    // 返回值：Error,liquidity,shortfall
+    // liquidity: 如果 liquidity > 0，说明账户在假设操作后仍有足够的抵押品支持其借款，账户是安全的。如果 liquidity == 0，说明账户没有多余的流动性。
+    // shortfall: 如果 shortfall > 0，说明账户在假设操作后抵押品不足以覆盖债务，可能面临清算风险。如果 shortfall == 0，说明账户没有抵押品缺口
     function getHypotheticalAccountLiquidityInternal(
         address account,
         CToken cTokenModify,
@@ -730,6 +740,7 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
         uint oErr;
 
         // For each asset the account is in
+        // 遍历所有用户参与质押的资产类型
         CToken[] memory assets = accountAssets[account];
         for (uint i = 0; i < assets.length; i++) {
             CToken asset = assets[i];
@@ -743,6 +754,7 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
             vars.exchangeRate = Exp({mantissa: vars.exchangeRateMantissa});
 
             // Get the normalized price of the asset
+            // 通过价格预言机获取当前CToken的价格，这部分待后面细看
             vars.oraclePriceMantissa = oracle.getUnderlyingPrice(asset);
             if (vars.oraclePriceMantissa == 0) {
                 return (Error.PRICE_ERROR, 0, 0);
@@ -750,22 +762,48 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
             vars.oraclePrice = Exp({mantissa: vars.oraclePriceMantissa});
 
             // Pre-compute a conversion factor from tokens -> ether (normalized price value)
+            // collateralFactor * exchangeRate * oraclePrice
             vars.tokensToDenom = mul_(mul_(vars.collateralFactor, vars.exchangeRate), vars.oraclePrice);
 
             // sumCollateral += tokensToDenom * cTokenBalance
+            // 累计的资产价值到vars.sumCollateral，每次累计的值：cTokenBalance * collateralFactor * exchangeRate * oraclePrice
+            // 因为最终是需要将所有CToken资产累计到sumCollateral，所以需要有一个价值单位，这里的价值单位需要适用所有所有的CToken
+            // oraclePrice： 多少美元一个CToken
+            // sumCollateral： 当所有资产遍历完成后，这个变量存储的事当前用户所有资产值多少美元
             vars.sumCollateral = mul_ScalarTruncateAddUInt(vars.tokensToDenom, vars.cTokenBalance, vars.sumCollateral);
 
             // sumBorrowPlusEffects += oraclePrice * borrowBalance
+            // sumBorrowPlusEffects累计的是当前用户贷款总额，比如你贷了10种资产/Token，最终需要评估者10种Token的总价值，单位美元
             vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, vars.borrowBalance, vars.sumBorrowPlusEffects);
 
             // Calculate effects of interacting with cTokenModify
-            if (asset == cTokenModify) {
+            if (asset == cTokenModify) { // 当前遍历的资产如果是这个交易本身想要redeem或者borrow的资产
                 // redeem effect
                 // sumBorrowPlusEffects += tokensToDenom * redeemTokens
+                // 建议先看下面针对借款的累计方式再看这里的实现
+                // 最终的流动性计算：流动性 = sumCollateral - sumBorrowPlusEffects
+
+                // 对于取款而言，一种直观的方式是会减少账户资产，从sumCollateral扣除取款部分的金额，对应的累计方式：
+                // sumCollateral  = sumCollateral - redeemTokens * collateralFactor * exchangeRate * oraclePrice
+                // 上面这种累计方式实现本身和下面目前的实现完全一致。接下了解释下面这种实现的含义
+                // 流动性 = sumCollateral - sumBorrowPlusEffects，扣除sumCollateral和增加/累计sumBorrowPlusEffects能到达一样的效果
+                // 取款 1000 USDT，这1000 USDT不取之前能担保的债务额度为：redeemTokens * collateralFactor * exchangeRate * oraclePrice
+                // 下面的实现是直接将这部分额度累计到了sumBorrowPlusEffects中
+                // 通俗易懂的含义：提供累计债务，起到类似扣除sumCollateral作用。
+                // 比如，redeemTokens = 1000 USDT，collateralFactor = 5e17(50%抵押因子)，exchangeRate = 1e18(CUSDT和USDT 1:1兑换)
+                // 取款1000 USDT，这1000 USDT原来能担保的债务为：1000 * 0.5 * 1 = 500 USDT价值的债务，
+                // 现在取款1000 USDT，直接将500 USDT累计到sumBorrowPlusEffects中，起到类似上面扣除sumCollateral的作用
                 vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.tokensToDenom, redeemTokens, vars.sumBorrowPlusEffects);
+
 
                 // borrow effect
                 // sumBorrowPlusEffects += oraclePrice * borrowAmount
+                // 这里是针对借款的累计，borrowAmount不为0。
+                // 这里处理笔记trick，比如你想借款 1000 USDT，
+                // 然后这个函数检查你的总资产，已有的贷款再加上这个1000 USDT，也就是取款金额先累计到你的贷款中
+                // 最终检查这1000 USDT取完后，会不会有风险，比如资不抵债这种可能不能让去
+                // 这里累计的公式和正常其他代币累计债务方式一致：redeemTokens * collateralFactor * exchangeRate * oraclePrice
+                // 但是和redeemTokens累计方式不一致，因为借款会直接增加债务
                 vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, borrowAmount, vars.sumBorrowPlusEffects);
             }
         }

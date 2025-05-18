@@ -84,23 +84,32 @@ contract CTokenStorage {
     /**
      * @notice Total amount of outstanding borrows of the underlying in this market
      */
-    // 当前市场总共借出的Token数量
+    // 当前市场总共借出的底层资产Token数量, 包括借款利息
+    // 在 Compound 协议中，借贷的是底层资产（underlying asset），对于 CUSDT 来说是 USDT
+    // CUSDT合约不支持借出 CUSDT Token，智能提供存入 USDT，获得对应数量的CUSDT
+    // 比如你想借 xxxx token, 最终访问的就是 Cxxx 合约，存款、借款信息存储在对应的Cxxx 合约中
+    // 比如质押ETH，借出 USDT；这些信息机存储在CUSDT合约中，这个合约中的totalBorrows也会累加，它的单位也是底层货币
+    // 借 USDT 必须访问 CUSDT合约，利息也是用USDT累计
     uint public totalBorrows;
 
     /**
      * @notice Total amount of reserves of the underlying held in this market
      */
-    // 当前市场协议总共持有的Token数量
+    // 当前市场合约本身总共持有的Token数量, 用户贷款利息的一个固定比例会累计到这里
+    // 
     uint public totalReserves;
 
     /**
      * @notice Total number of tokens in circulation
      */
-    // 当前市场总共发出去的CToken数量
+    // 当前市场总共发出去的CToken数量，CToken数量本身没有利息的概念，一个CToken值多少Token，由 exchangerate决定
+    // exchangeRate = (totalCash + totalBorrows - totalReserves) / totalSupply
     uint public totalSupply;
 
     // Official record of token balances for each account
-    // 存储每个用户地区Ctoken的余额，如果是USDT合约则对应每个用户 USDT的余额；如果是CUSDT则对应每个用户CUSDT账户余额
+    // 存储每个用户地址Ctoken的余额，如果是CUSDT则对应每个用户CUSDT账户余额
+    // 用户存款时，会给用户铸造CToken，对应就是累计用户的 accountTokens[用户地址] += 本次存款铸造的CToken数量
+    // 同时给用户铸造的CToken数量也会累计到totalSupply中
     mapping(address => uint) internal accountTokens;
 
     // Approved token transfer amounts on behalf of others

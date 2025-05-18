@@ -15,7 +15,8 @@ contract ExponentialNoError {
     uint constant mantissaOne = expScale;
 
     struct Exp {
-        uint mantissa;
+        // 源码里面变量名包含mantissa意味着：当前变量是乘了1e18系数后的值，原因还是Solidity不支持浮点数运算
+        uint mantissa; 
     }
 
     struct Double {
@@ -35,6 +36,7 @@ contract ExponentialNoError {
      * @dev Multiply an Exp by a scalar, then truncate to return an unsigned integer.
      */
     function mul_ScalarTruncate(Exp memory a, uint scalar) pure internal returns (uint) {
+        // mul_ 这个有好几种重载的实现，这里调用的是 Exp和uint类型参数的mul_
         Exp memory product = mul_(a, scalar);
         return truncate(product);
     }
@@ -114,7 +116,7 @@ contract ExponentialNoError {
     }
 
     function mul_(Exp memory a, uint b) pure internal returns (Exp memory) {
-        return Exp({mantissa: mul_(a.mantissa, b)});
+        return Exp({mantissa: mul_(a.mantissa, b)}); // 这里调用的是 uint和uint参数的mul_
     }
 
     function mul_(uint a, Exp memory b) pure internal returns (uint) {

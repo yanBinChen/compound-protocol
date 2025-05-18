@@ -225,8 +225,11 @@ abstract contract CToken is
     ) external view override returns (uint, uint, uint, uint) {
         return (
             NO_ERROR,
+            // CToken余额
             accountTokens[account],
+            // 当前用户累计利息的借款余额，这里没有更新利率，直接使用之前的信息计算的累计利率
             borrowBalanceStoredInternal(account),
+            // 计算CToken汇率，和上面一样，这里没有更新利率，直接使用之前的信息计算的累计利率
             exchangeRateStoredInternal()
         );
     }
@@ -351,6 +354,12 @@ abstract contract CToken is
      * @dev This function does not accrue interest before calculating the exchange rate
      * @return calculated exchange rate scaled by 1e18
      */
+    //  exchangeRate: 一个CToken能兑换多少个Token
+    // 用户存款会更给用户一定数量的CToken： 存款金额/exchangeRate
+    // 按照预期CToken的价值是会不断上涨的，也就是存入资金的用户到时可以提取更多的Token,即获得了存款利息
+    // exchangeRate = (totalCash + totalBorrows - totalReserves) / totalSupply
+    // totalBorrows - totalReserves 一定是递增的，因为totalBorrows包括所有累计的利息，totalReserves中包括一部分的利息，比如10%的累计利息
+    // totalCash增加时，totalSupply也会增加（存款会给用户一定数量的CToken），但是两者是成比例增加的，因为的初始值 exchangeRate 大于 1, totalCash 更多
     function exchangeRateStoredInternal() internal view virtual returns (uint) {
         uint _totalSupply = totalSupply;
         if (_totalSupply == 0) {
@@ -393,7 +402,7 @@ abstract contract CToken is
         // ETH 区块链上的区块号，使用区块号累计利息，而不是现实时间的时间戳，因为分布式系统的时间戳很难一致，会以漂移等问题
         uint currentBlockNumber = getBlockNumber();
         // 上次更新利息的时的区块号，一区块只更新一次利息
-        uint accrualBlockNumberPrior = accrualBlockNumber; 
+        uint accrualBlockNumberPrior = accrualBlockNumber;
 
         /* Short-circuit accumulating 0 interest */
         if (accrualBlockNumberPrior == currentBlockNumber) {
@@ -423,6 +432,7 @@ abstract contract CToken is
         );
 
         /* Calculate the number of blocks elapsed since the last accrual */
+        // 以太网中的区块号作为时间，累计利率
         uint blockDelta = currentBlockNumber - accrualBlockNumberPrior;
 
         /*
@@ -434,20 +444,33 @@ abstract contract CToken is
          *  borrowIndexNew = simpleInterestFactor * borrowIndex + borrowIndex
          */
 
+        // Block总利率 = 每个Block的利率 * Block数量
         Exp memory simpleInterestFactor = mul_(
             Exp({mantissa: borrowRateMantissa}),
             blockDelta
         );
+        // 累计的利息 = Block总利率 * 借款总额
         uint interestAccumulated = mul_ScalarTruncate(
             simpleInterestFactor,
             borrowsPrior
         );
+        // 更新借款总额：先前的借款总额 + 累计的利息
+        // 可以看到所有的利息都会累计到totalBorrowsNew中里面
         uint totalBorrowsNew = interestAccumulated + borrowsPrior;
+        // 更新合约累计的资产数 = 累计的利息 * 合约分配的百分比 + 合约先前累计的资产
+        // interestAccumulated 的一部分还会累计到totalReservesNew中
+        // totalBorrowsNew累计的是全部的利息，包括这里累计到totalReservesNew的这部分，并不是
+        // 类似totalBorrowsNew累计 90%的利息，totalReservesNew累计10%的利息
         uint totalReservesNew = mul_ScalarTruncateAddUInt(
             Exp({mantissa: reserveFactorMantissa}),
             interestAccumulated,
             reservesPrior
         );
+        // borrowIndexNew是体现复利的累计利率
+        // FV = PV(1+ x * t)，x为当前资金利用率，t为Block数量
+        // simpleInterestFactor 对应的是: x * t
+        // borrowIndexPrior: 对应的是旧利率
+        // FV = borrowIndexPrior + borrowIndexPrior * simpleInterestFactor
         uint borrowIndexNew = mul_ScalarTruncateAddUInt(
             simpleInterestFactor,
             borrowIndexPrior,
@@ -459,6 +482,11 @@ abstract contract CToken is
         // (No safe failures beyond this point)
 
         /* We write the previously calculated values into storage */
+        // 这个接口最终更新的就是以下四个变量
+        // borrowIndex影响贷款利息、totalBorrows和totalReserves影响资金使用率，进而影响贷款和借款利率和exchangeRate
+        // exchangeRate表示一个CToken兑换多少个Token，间接表示存款利息。totalBorrows - totalReserves 一般为正，
+        // 因为贷款利息大部分累积到totalBorrows中了，小部分累积到 totalReserves
+        // exchangeRate = (totalCash + totalBorrows - totalReserves) / totalSupply
         accrualBlockNumber = currentBlockNumber;
         borrowIndex = borrowIndexNew;
         totalBorrows = totalBorrowsNew;
@@ -495,6 +523,7 @@ abstract contract CToken is
      */
     function mintFresh(address minter, uint mintAmount) internal {
         /* Fail if mint not allowed */
+        // 主要是风控逻辑，比如当前代币是否允许质押
         uint allowed = comptroller.mintAllowed(
             address(this),
             minter,
@@ -523,13 +552,14 @@ abstract contract CToken is
          *  in case of a fee. On success, the cToken holds an additional `actualMintAmount`
          *  of cash.
          */
+        //  从minter账户转mintAmount个Token到当前合约账户，返回值是合约账户真正收到的Token数量，主要是为了兼容早起的代币
         uint actualMintAmount = doTransferIn(minter, mintAmount);
 
         /*
          * We get the current exchange rate and calculate the number of cTokens to be minted:
          *  mintTokens = actualMintAmount / exchangeRate
          */
-
+        // 计算有个给minter铸造多少个CToken
         uint mintTokens = div_(actualMintAmount, exchangeRate);
 
         /*
@@ -538,7 +568,9 @@ abstract contract CToken is
          *  accountTokensNew = accountTokens[minter] + mintTokens
          * And write them into storage
          */
+        //  累计CToken的数量
         totalSupply = totalSupply + mintTokens;
+        // CToken记录到minter账户下
         accountTokens[minter] = accountTokens[minter] + mintTokens;
 
         /* We emit a Mint event, and a Transfer event */
@@ -555,6 +587,7 @@ abstract contract CToken is
      * @dev Accrues interest whether or not the operation succeeds, unless reverted
      * @param redeemTokens The number of cTokens to redeem into underlying
      */
+    // 取款: 用 CToken 换回 Token，包括利息
     function redeemInternal(uint redeemTokens) internal nonReentrant {
         accrueInterest();
         // redeemFresh emits redeem-specific logs on errors, so we don't need to
@@ -579,17 +612,23 @@ abstract contract CToken is
      * @param redeemTokensIn The number of cTokens to redeem into underlying (only one of redeemTokensIn or redeemAmountIn may be non-zero)
      * @param redeemAmountIn The number of underlying tokens to receive from redeeming cTokens (only one of redeemTokensIn or redeemAmountIn may be non-zero)
      */
+    //  赎回资金有两种方式：
+    // redeemTokensIn: 本次你想卖多个CToken，最终受到的Token数量为： redeemTokensIn * exchangeRate
+    // redeemAmountIn: 本次你想赎回多少钱，比如我想赎回1000 USDT，内部会跟据exchangeRate计算有个从你账户销毁多少个CToken
+    // 一次调用只能使用其中一种方式，即redeemTokensIn和redeemAmountIn只能有一个参数的值为非0
     function redeemFresh(
         address payable redeemer,
         uint redeemTokensIn,
         uint redeemAmountIn
     ) internal {
+        // 只允许其中一个参数非0
         require(
             redeemTokensIn == 0 || redeemAmountIn == 0,
             "one of redeemTokensIn or redeemAmountIn must be zero"
         );
 
         /* exchangeRate = invoke Exchange Rate Stored() */
+        // 获取最新的CToken的汇率，即一个CToken能换多少个Token
         Exp memory exchangeRate = Exp({mantissa: exchangeRateStoredInternal()});
 
         uint redeemTokens;
@@ -601,7 +640,11 @@ abstract contract CToken is
              *  redeemTokens = redeemTokensIn
              *  redeemAmount = redeemTokensIn x exchangeRateCurrent
              */
+            //  当前指定卖出CToken的数量
             redeemTokens = redeemTokensIn;
+            // 根据CToken的数量，计算底层资产Token的数量
+            // 其实就是 exchangeRate * redeemTokensIn / 1e18
+            // 因为exchangeRate和redeemTokensIn都是乘了1e18，所以计算的时候需要除一个1e18
             redeemAmount = mul_ScalarTruncate(exchangeRate, redeemTokensIn);
         } else {
             /*
@@ -609,11 +652,14 @@ abstract contract CToken is
              *  redeemTokens = redeemAmountIn / exchangeRate
              *  redeemAmount = redeemAmountIn
              */
+            //  redeemTokens = redeemAmountIn * 1e18 / exchangeRate
             redeemTokens = div_(redeemAmountIn, exchangeRate);
+            // 金额就是参数指定的金额
             redeemAmount = redeemAmountIn;
         }
 
         /* Fail if redeem not allowed */
+        // comptroller 负责风控，评估你是否能提取这么多资金。比如之前你用这些资金做了贷款，那么还贷之前，抵押的资金不能提取
         uint allowed = comptroller.redeemAllowed(
             address(this),
             redeemer,

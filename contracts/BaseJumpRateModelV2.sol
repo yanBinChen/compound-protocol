@@ -129,6 +129,7 @@ abstract contract BaseJumpRateModelV2 is InterestRateModel {
      */
     function updateJumpRateModelInternal(uint baseRatePerYear, uint multiplierPerYear, uint jumpMultiplierPerYear, uint kink_) internal {
         baseRatePerBlock = baseRatePerYear / blocksPerYear;
+        // V2 利率模型相比V1 multiplierPerBlock值会更大, 相当于在V1基础上乘了个 1/kink_ 系数
         multiplierPerBlock = (multiplierPerYear * BASE) / (blocksPerYear * kink_);
         jumpMultiplierPerBlock = jumpMultiplierPerYear / blocksPerYear;
         kink = kink_;

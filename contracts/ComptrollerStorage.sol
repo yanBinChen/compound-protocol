@@ -51,6 +51,7 @@ contract ComptrollerV1Storage is UnitrollerAdminStorage {
     /**
      * @notice Per-account mapping of "assets you are in", capped by maxAssets
      */
+    //  标记每个用户参与质押的市场
     mapping(address => CToken[]) public accountAssets;
 
 }
@@ -58,6 +59,9 @@ contract ComptrollerV1Storage is UnitrollerAdminStorage {
 contract ComptrollerV2Storage is ComptrollerV1Storage {
     struct Market {
         // Whether or not this market is listed
+        // 表示该 cToken 是否被 Compound 协议正式支持并列入市场
+        // 为 true表示该 cToken 市场是活跃的，支持存款（mint）、借款（borrow）、赎回（redeem）等操作。
+        // 当 isListed == false 时，该市场被视为未上市，相关操作（如赎回）会被阻止。
         bool isListed;
 
         //  Multiplier representing the most one can borrow against their collateral in this market.
@@ -66,6 +70,12 @@ contract ComptrollerV2Storage is ComptrollerV1Storage {
         uint collateralFactorMantissa;
 
         // Per-market mapping of "accounts in this asset"
+        // 判断某个用户是否参与了这个市场
+        // 如果 accountMembership[user] == true，表示该用户已经进入（“entered”）这个市场，
+        // 通常意味着用户将该市场的 cToken 用作抵押品（collateral）以进行借款或其他操作。
+        // 用于确定用户是否可以将该市场的资产用作抵押品来计算借款能力（借贷限额）。
+        // 在清算（liquidation）逻辑中，accountMembership 用于检查用户在哪些市场中持有抵押品，以便计算总抵押品价值和清算风险。
+        // 影响用户的 accountLiquidity，即用户在协议中的净流动性和借款能力。
         mapping(address => bool) accountMembership;
 
         // Whether or not this market receives COMP
