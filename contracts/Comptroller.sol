@@ -279,6 +279,7 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
      * @return 0 if the redeem is allowed, otherwise a semi-opaque error code (See ErrorReporter.sol)
      */
     function redeemAllowed(address cToken, address redeemer, uint redeemTokens) override external returns (uint) {
+        // 检查当前账户是否可以取走这么多钱，比如取款完成后，账户抵押品价值是否依旧可以满足合约要求
         uint allowed = redeemAllowedInternal(cToken, redeemer, redeemTokens);
         if (allowed != uint(Error.NO_ERROR)) {
             return allowed;
@@ -298,11 +299,14 @@ contract Comptroller is ComptrollerV7Storage, ComptrollerInterface, ComptrollerE
         }
 
         /* If the redeemer is not 'in' the market, then we can bypass the liquidity check */
+        // 这个意思是这个账户压根就没有持有CToken
+        // 为了减少gas fee，提前判断
         if (!markets[cToken].accountMembership[redeemer]) {
             return uint(Error.NO_ERROR);
         }
 
         /* Otherwise, perform a hypothetical liquidity check to guard against shortfall */
+        // 检查当前账户是否有资格取款：假设取款执行完成了，用户会不会资不抵债，已有的贷款是否能满足collateralFactor要求
         (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(redeemer, CToken(cToken), redeemTokens, 0);
         if (err != Error.NO_ERROR) {
             return uint(err);

@@ -110,6 +110,7 @@ contract CTokenStorage {
     // 存储每个用户地址Ctoken的余额，如果是CUSDT则对应每个用户CUSDT账户余额
     // 用户存款时，会给用户铸造CToken，对应就是累计用户的 accountTokens[用户地址] += 本次存款铸造的CToken数量
     // 同时给用户铸造的CToken数量也会累计到totalSupply中
+    // 用户取款redeem的时候也会扣除accountTokens[用户地址]中的CToken数量，以及从totalSupply中扣除
     mapping(address => uint) internal accountTokens;
 
     // Approved token transfer amounts on behalf of others

@@ -614,7 +614,7 @@ abstract contract CToken is
      */
     //  赎回资金有两种方式：
     // redeemTokensIn: 本次你想卖多个CToken，最终受到的Token数量为： redeemTokensIn * exchangeRate
-    // redeemAmountIn: 本次你想赎回多少钱，比如我想赎回1000 USDT，内部会跟据exchangeRate计算有个从你账户销毁多少个CToken
+    // redeemAmountIn: 本次你想赎回多少个Token，比如我想赎回1000 个USDT，内部会跟据exchangeRate计算有个从你账户销毁多少个CToken
     // 一次调用只能使用其中一种方式，即redeemTokensIn和redeemAmountIn只能有一个参数的值为非0
     function redeemFresh(
         address payable redeemer,
@@ -660,21 +660,26 @@ abstract contract CToken is
 
         /* Fail if redeem not allowed */
         // comptroller 负责风控，评估你是否能提取这么多资金。比如之前你用这些资金做了贷款，那么还贷之前，抵押的资金不能提取
+        // 检查当前账户是否有资格取款：假设取款执行完成了，用户会不会资不抵债，已有的贷款是否能满足collateralFactor要求
         uint allowed = comptroller.redeemAllowed(
             address(this),
             redeemer,
             redeemTokens
         );
         if (allowed != 0) {
+            // 当前账户不允许取这么钱
             revert RedeemComptrollerRejection(allowed);
         }
 
         /* Verify market's block number equals current block number */
+        // 预期每次执行钱相关的操作，都需要使用最新的利率
+        // accrualBlockNumber记录的就是上次更新利率的区块号
         if (accrualBlockNumber != getBlockNumber()) {
             revert RedeemFreshnessCheck();
         }
 
         /* Fail gracefully if protocol has insufficient cash */
+        // 如果合约资金不够，那么自然就不能支持取款了
         if (getCashPrior() < redeemAmount) {
             revert RedeemTransferOutNotPossible();
         }
@@ -687,7 +692,10 @@ abstract contract CToken is
          * We write the previously calculated values into storage.
          *  Note: Avoid token reentrancy attacks by writing reduced supply before external transfer.
          */
+        // 执行取款逻辑：扣除账户 CToken 数量，增加 Token数量
+        // 扣除合约发行的CToken总数量
         totalSupply = totalSupply - redeemTokens;
+        // 从账户中扣除CToken数量
         accountTokens[redeemer] = accountTokens[redeemer] - redeemTokens;
 
         /*
@@ -696,6 +704,8 @@ abstract contract CToken is
          *  On success, the cToken has redeemAmount less of cash.
          *  doTransferOut reverts if anything goes wrong, since we can't be sure if side effects occurred.
          */
+        //  从当前合约账户上转出redeemAmount这么多Token到redeemer账户
+        // 主演转账逻辑：accountTokens[src] -= tokens; accountTokens[dst] += tokens;
         doTransferOut(redeemer, redeemAmount);
 
         /* We emit a Transfer event, and a Redeem event */
@@ -703,6 +713,7 @@ abstract contract CToken is
         emit Redeem(redeemer, redeemAmount, redeemTokens);
 
         /* We call the defense hook */
+        // 这个是操作完成后的检查，里面其实只要求 redeemTokens == 0的时候，redeemAmount也需要为0
         comptroller.redeemVerify(
             address(this),
             redeemer,
