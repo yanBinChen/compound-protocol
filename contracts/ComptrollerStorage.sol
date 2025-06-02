@@ -6,28 +6,31 @@ import "./PriceOracle.sol";
 
 contract UnitrollerAdminStorage {
     /**
-    * @notice Administrator for this contract
-    */
-    address public admin;
+     * @notice Administrator for this contract
+     */
+    address public admin; // 当前的admin
 
     /**
-    * @notice Pending administrator for this contract
-    */
+     * @notice Pending administrator for this contract
+     */
+    // 下一任的admin，更新admin时，先将新admin设置到pendingAdmin
+    // 然后再将admin = pendingAdmin, pendingAdmin = 0
     address public pendingAdmin;
 
     /**
-    * @notice Active brains of Unitroller
-    */
+     * @notice Active brains of Unitroller
+     */
+    // 更新的策略和 admin类似
     address public comptrollerImplementation;
 
     /**
-    * @notice Pending brains of Unitroller
-    */
+     * @notice Pending brains of Unitroller
+     */
+    // 新Comptroller
     address public pendingComptrollerImplementation;
 }
 
 contract ComptrollerV1Storage is UnitrollerAdminStorage {
-
     /**
      * @notice Oracle which gives the price of any given asset
      */
@@ -36,11 +39,16 @@ contract ComptrollerV1Storage is UnitrollerAdminStorage {
     /**
      * @notice Multiplier used to calculate the maximum repayAmount when liquidating a borrow
      */
+    // 单次最多清算多少抵押品，这个值是合约的前的值是50%。默认值可以从：
+    // https://etherscan.io/address/0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B#readProxyContract 页面获取
+    // 也就是1000 USDT，只要抵押品实际价值币要求的值少，就能清算你贷款的50%。
     uint public closeFactorMantissa;
 
     /**
      * @notice Multiplier representing the discount on collateral that a liquidator receives
      */
+    //  合约当前的值为1080000000000000000，可以从这个页面获取：https://etherscan.io/address/0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B#readProxyContract
+    // 当前值是1.08的意思，108%，意思是A替B清算，可以获取到8%的收益。A 替 B 还款 100 USDT，A 可以获得B价值108 USDT抵押品
     uint public liquidationIncentiveMantissa;
 
     /**
@@ -53,7 +61,6 @@ contract ComptrollerV1Storage is UnitrollerAdminStorage {
      */
     //  标记每个用户参与质押的市场
     mapping(address => CToken[]) public accountAssets;
-
 }
 
 contract ComptrollerV2Storage is ComptrollerV1Storage {
@@ -63,12 +70,10 @@ contract ComptrollerV2Storage is ComptrollerV1Storage {
         // 为 true表示该 cToken 市场是活跃的，支持存款（mint）、借款（borrow）、赎回（redeem）等操作。
         // 当 isListed == false 时，该市场被视为未上市，相关操作（如赎回）会被阻止。
         bool isListed;
-
         //  Multiplier representing the most one can borrow against their collateral in this market.
         //  For instance, 0.9 to allow borrowing 90% of collateral value.
         //  Must be between 0 and 1, and stored as a mantissa.
         uint collateralFactorMantissa;
-
         // Per-market mapping of "accounts in this asset"
         // 判断某个用户是否参与了这个市场
         // 如果 accountMembership[user] == true，表示该用户已经进入（“entered”）这个市场，
@@ -77,7 +82,6 @@ contract ComptrollerV2Storage is ComptrollerV1Storage {
         // 在清算（liquidation）逻辑中，accountMembership 用于检查用户在哪些市场中持有抵押品，以便计算总抵押品价值和清算风险。
         // 影响用户的 accountLiquidity，即用户在协议中的净流动性和借款能力。
         mapping(address => bool) accountMembership;
-
         // Whether or not this market receives COMP
         bool isComped;
     }
@@ -87,7 +91,6 @@ contract ComptrollerV2Storage is ComptrollerV1Storage {
      * @dev Used e.g. to determine if a market is supported
      */
     mapping(address => Market) public markets;
-
 
     /**
      * @notice The Pause Guardian can pause certain actions as a safety mechanism.
@@ -107,7 +110,6 @@ contract ComptrollerV3Storage is ComptrollerV2Storage {
     struct CompMarketState {
         // The market's last updated compBorrowIndex or compSupplyIndex
         uint224 index;
-
         // The block number the index was last updated at
         uint32 block;
     }

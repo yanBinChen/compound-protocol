@@ -808,8 +808,9 @@ abstract contract CToken is
      * @notice Sender repays their own borrow
      * @param repayAmount The amount to repay, or -1 for the full outstanding amount
      */
+    // 贷款人还款
     function repayBorrowInternal(uint repayAmount) internal nonReentrant {
-        accrueInterest();
+        accrueInterest(); // 更新利息计算相关变量，后续需要使用最新的状态累计利息
         // repayBorrowFresh emits repay-borrow-specific logs on errors, so we don't need to
         repayBorrowFresh(msg.sender, msg.sender, repayAmount);
     }
@@ -819,6 +820,7 @@ abstract contract CToken is
      * @param borrower the account with the debt being payed off
      * @param repayAmount The amount to repay, or -1 for the full outstanding amount
      */
+    // 替贷款人还款
     function repayBorrowBehalfInternal(
         address borrower,
         uint repayAmount
@@ -835,12 +837,21 @@ abstract contract CToken is
      * @param repayAmount the amount of underlying tokens being returned, or -1 for the full outstanding amount
      * @return (uint) the actual repayment amount.
      */
+    //  这个接口其实支持给其他人还款
+    // payer付钱的人
+    // borrower：借款的人
+    // repayAmount：还款金额
+    // 需要注意的是，还款本身不需要校验还款人的流动性，从合约角度看，还款是减少了合约的债务，增加了现金，降低了风险
+    
+    // 清算流程就是一种给他人还款的应用场景，我给你还款，我获得你的抵押品，并且抵押品的价值大于我还款的金额
+    // 有利可图才能让我主动替你还款
     function repayBorrowFresh(
         address payer,
         address borrower,
         uint repayAmount
     ) internal returns (uint) {
         /* Fail if repayBorrow not allowed */
+        // 这个函数看起来只是检查了当前还款的代币是否是市场上正常交易的代币
         uint allowed = comptroller.repayBorrowAllowed(
             address(this),
             payer,
@@ -857,9 +868,11 @@ abstract contract CToken is
         }
 
         /* We fetch the amount the borrower owes, with accumulated interest */
+        // 获取最新的贷款总额，累计了利息
         uint accountBorrowsPrev = borrowBalanceStoredInternal(borrower);
 
         /* If repayAmount == -1, repayAmount = accountBorrows */
+        // repayAmount为-1的时候，一次性还清所有贷款
         uint repayAmountFinal = repayAmount == type(uint).max
             ? accountBorrowsPrev
             : repayAmount;
@@ -875,6 +888,7 @@ abstract contract CToken is
          *  doTransferIn reverts if anything goes wrong, since we can't be sure if side effects occurred.
          *   it returns the amount actually transferred, in case of a fee.
          */
+        //  payer账户往当前合约账户转账repayAmountFinal 个USDT
         uint actualRepayAmount = doTransferIn(payer, repayAmountFinal);
 
         /*
@@ -909,13 +923,20 @@ abstract contract CToken is
      * @param cTokenCollateral The market in which to seize collateral from the borrower
      * @param repayAmount The amount of the underlying borrowed asset to repay
      */
+    //  清算
+    // 比如质押CDAI,贷款了USDT。清算时调用的是 CUSDT的liquidateBorrow函数
+
+    // 部分场景可能是多种CToken作为抵押品，liquidateBorrow 一次只能处理一种 cToken，由cTokenCollateral指定，
+    // 可以选择多次调用 liquidateBorrow，每次针对不同的 cToken，直到账户不再可清算。
+    // 如果清算repayAmount后，账户没有足够的CToken支付给清算者奖励，则此次清算会失败
     function liquidateBorrowInternal(
         address borrower,
         uint repayAmount,
-        CTokenInterface cTokenCollateral
+        CTokenInterface cTokenCollateral // 对应抵押品的Token地址，清算的奖励也是这个Token
     ) internal nonReentrant {
-        accrueInterest();
+        accrueInterest(); // 这里更新的CUSDT的利息相关变量
 
+        // 这里更新的CDAI的利息相关变量，可能是需要计算CADI的市场价值，后续需要计算抵押品的价格
         uint error = cTokenCollateral.accrueInterest();
         if (error != NO_ERROR) {
             // accrueInterest emits logs on errors, but we still want to log the fact that an attempted liquidation failed
@@ -939,13 +960,19 @@ abstract contract CToken is
      * @param cTokenCollateral The market in which to seize collateral from the borrower
      * @param repayAmount The amount of the underlying borrowed asset to repay
      */
+    //  清算执行逻辑
+
+    // 部分场景可能是多种CToken作为抵押品，liquidateBorrowFresh 一次只能处理一种 cToken，由cTokenCollateral指定，
+    // 可以选择多次调用 liquidateBorrow，每次针对不同的 cToken，直到账户不再可清算。
+    // 如果清算repayAmount后，账户没有足够的CToken支付给清算者奖励，则此次清算会失败
     function liquidateBorrowFresh(
-        address liquidator,
-        address borrower,
-        uint repayAmount,
-        CTokenInterface cTokenCollateral
+        address liquidator, // 发起清算的人，并且会获得一定的奖励
+        address borrower,  // 贷款的人，对应抵押品不满足要求的账户，会将清算的抵押品转一部分到发起清算的人
+        uint repayAmount, // 清算金额
+        CTokenInterface cTokenCollateral // 清算的代币地址
     ) internal {
         /* Fail if liquidate not allowed */
+        // 是否允许清算，允许清算的资产价值。如果borrower的抵押品满足要求，以及清算金额有效，则返回0，表示允许本次清算
         uint allowed = comptroller.liquidateBorrowAllowed(
             address(this),
             address(cTokenCollateral),
@@ -953,7 +980,7 @@ abstract contract CToken is
             borrower,
             repayAmount
         );
-        if (allowed != 0) {
+        if (allowed != 0) { // 不允许清算，参数非法
             revert LiquidateComptrollerRejection(allowed);
         }
 
@@ -968,6 +995,7 @@ abstract contract CToken is
         }
 
         /* Fail if borrower = liquidator */
+        // 不能清算自己
         if (borrower == liquidator) {
             revert LiquidateLiquidatorIsBorrower();
         }
@@ -983,6 +1011,8 @@ abstract contract CToken is
         }
 
         /* Fail if repayBorrow fails */
+        // liquidator 替 borrower 还款 repayAmount 个 Token
+        // 返回值是实际还款的金额 actualRepayAmount，主要是为了兼容
         uint actualRepayAmount = repayBorrowFresh(
             liquidator,
             borrower,
@@ -1006,6 +1036,8 @@ abstract contract CToken is
         );
 
         /* Revert if borrower collateral token balance < seizeTokens */
+        // 要求清算的账户 cTokenCollateral 的CToken数量 >= seizeTokens
+        // 否则本次清算失败
         require(
             cTokenCollateral.balanceOf(borrower) >= seizeTokens,
             "LIQUIDATE_SEIZE_TOO_MUCH"
@@ -1041,11 +1073,13 @@ abstract contract CToken is
      * @param seizeTokens The number of cTokens to seize
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    //  borrower 转seizeTokens个CToken给liquidator
     function seize(
         address liquidator,
         address borrower,
         uint seizeTokens
     ) external override nonReentrant returns (uint) {
+        // msg.sender：当前CToken 和合约地址，
         seizeInternal(msg.sender, liquidator, borrower, seizeTokens);
 
         return NO_ERROR;
@@ -1061,7 +1095,7 @@ abstract contract CToken is
      * @param seizeTokens The number of cTokens to seize
      */
     function seizeInternal(
-        address seizerToken,
+        address seizerToken, // 发送者的地址，清算场景下是CToken合约地址
         address liquidator,
         address borrower,
         uint seizeTokens
@@ -1088,12 +1122,16 @@ abstract contract CToken is
          *  borrowerTokensNew = accountTokens[borrower] - seizeTokens
          *  liquidatorTokensNew = accountTokens[liquidator] + seizeTokens
          */
+        // 清算者获得8%的收益，这8%里面的2.8%会被合约reserve
+        // 合约reserve的是Token数量，所以还需要一次转换，2.8%的CToken转换为Token数量，保留在合约中
         uint protocolSeizeTokens = mul_(
             seizeTokens,
             Exp({mantissa: protocolSeizeShareMantissa})
         );
         uint liquidatorSeizeTokens = seizeTokens - protocolSeizeTokens;
+        // 一个CToken值多少Token
         Exp memory exchangeRate = Exp({mantissa: exchangeRateStoredInternal()});
+        // 转换为合约本身保留的Token数量
         uint protocolSeizeAmount = mul_ScalarTruncate(
             exchangeRate,
             protocolSeizeTokens
@@ -1106,7 +1144,9 @@ abstract contract CToken is
 
         /* We write the calculated values into storage */
         totalReserves = totalReservesNew;
+        // 销毁了CToken数量，因为转换到totalReserves中了
         totalSupply = totalSupply - protocolSeizeTokens;
+        // borrower的CToken资产转到liquidator账户下
         accountTokens[borrower] = accountTokens[borrower] - seizeTokens;
         accountTokens[liquidator] =
             accountTokens[liquidator] +

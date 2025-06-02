@@ -535,6 +535,10 @@ contract Comptroller is
      * @param repayAmount The amount of the underlying asset the account would repay
      * @return 0 if the repay is allowed, otherwise a semi-opaque error code (See ErrorReporter.sol)
      */
+    //  cToken: 还款的市场
+    // payer： 付钱的账户
+    // borrower：之前贷款的账户，payer, 替这个账户还款
+    // borrower和payer可能是同一个账户，大部分都是自己提资金还款
     function repayBorrowAllowed(
         address cToken,
         address payer,
@@ -546,11 +550,13 @@ contract Comptroller is
         borrower;
         repayAmount;
 
+        // 这个函数看起来只是检查了当前还款的代币是否是市场上正常交易的代币，下面其他部分都更新Compound风控模块的属性
         if (!markets[cToken].isListed) {
             return uint(Error.MARKET_NOT_LISTED);
         }
 
         // Keep the flywheel moving
+        // 获取当前的贷款利率，还款前需要先累计贷款人的利息，下面这一坨
         Exp memory borrowIndex = Exp({mantissa: CToken(cToken).borrowIndex()});
         updateCompBorrowIndex(cToken, borrowIndex);
         distributeBorrowerComp(cToken, borrower, borrowIndex);
@@ -593,6 +599,13 @@ contract Comptroller is
      * @param borrower The address of the borrower
      * @param repayAmount The amount of underlying being repaid
      */
+    // cTokenBorrowed: 如果你要清算的是借贷者borrower的USDT借贷，则这里的cTokenBorrowed地址就是CUSDT合约地址
+    // cTokenBorrowed 和借贷者借贷的Token相关
+    // cTokenCollateral: 清算借贷者borrower的哪种抵押品，
+    // 比如 A 抵押品有10种，借贷的是USDT，你只对其中CDAI抵押品感兴趣，即清算后你可以获得额外8%的CDAI抵押品
+    // 那么这里的cTokenCollateral就是CDAI，比如你提A还款500 USDT，则你可以获得大概 价值 108% * 500 = 540（忽略合约的reserve先）USDT的CDAI
+    // 需要注意的事如果A的CDAI抵押品总价值小于540 USDT, 则本次会失败
+    // 参数本身要合法，也就是A必要有借贷，并且抵押品不符合协议的要求
     function liquidateBorrowAllowed(
         address cTokenBorrowed,
         address cTokenCollateral,
@@ -610,6 +623,8 @@ contract Comptroller is
             return uint(Error.MARKET_NOT_LISTED);
         }
 
+        // 获取贷款人 cTokenBorrowed 代币的贷款总金额，利息已经中之前的步骤中更新了
+        // 如果贷款人在cTokenBorrowed没有贷款，则borrowBalance值为0
         uint borrowBalance = CToken(cTokenBorrowed).borrowBalanceStored(
             borrower
         );
@@ -622,6 +637,7 @@ contract Comptroller is
             );
         } else {
             /* The borrower must have shortfall in order to be liquidatable */
+            // 获取当前账户抵押品的缺口数量
             (Error err, , uint shortfall) = getAccountLiquidityInternal(
                 borrower
             );
@@ -630,15 +646,22 @@ contract Comptroller is
             }
 
             if (shortfall == 0) {
+                // 当前账户的抵押品价值足够，不能清算
                 return uint(Error.INSUFFICIENT_SHORTFALL);
             }
 
             /* The liquidator may not repay more than what is allowed by the closeFactor */
+            // 计算最大清算金额：比如贷款了1000 USDT，shortfall是10USDT，那么这里最大允许清算的金额是
+            // 1000 * closeFactorMantissa，这个值是合约的前的值是50%。默认值可以从：
+            // https://etherscan.io/address/0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B#readProxyContract 页面获取
+            // 也就是1000 USDT，只要抵押品实际价值币要求的值少，就能清算你贷款的50%。
+            // 从这里看，贷款时的抵押品任何时候不能少，否则损失就大了，会直接清算贷款金额的50%
             uint maxClose = mul_ScalarTruncate(
                 Exp({mantissa: closeFactorMantissa}),
                 borrowBalance
             );
             if (repayAmount > maxClose) {
+                // 本次清算的金额不能币最大清算金额大
                 return uint(Error.TOO_MUCH_REPAY);
             }
         }
@@ -855,6 +878,7 @@ contract Comptroller is
                 account liquidity in excess of collateral requirements,
      *          account shortfall below collateral requirements)
      */
+    //  account 账户可以清算多少
     function getAccountLiquidityInternal(
         address account
     ) internal view returns (Error, uint, uint) {
@@ -916,6 +940,11 @@ contract Comptroller is
     // 返回值：Error,liquidity,shortfall
     // liquidity: 如果 liquidity > 0，说明账户在假设操作后仍有足够的抵押品支持其借款，账户是安全的。如果 liquidity == 0，说明账户没有多余的流动性。
     // shortfall: 如果 shortfall > 0，说明账户在假设操作后抵押品不足以覆盖债务，可能面临清算风险。如果 shortfall == 0，说明账户没有抵押品缺口
+
+    // 清算一个账户时也会使用这个接口，清算时只用account的有效参数，剩余三个参数都是0
+    // 第一个返回值：error code
+    // 第二个返回值：只有抵押品价值满足贷款要求的抵押价值时才会是非0，表示道歉账户抵押品的冗余/安全度
+    // 第三个返回值：只有账户的抵押品价值低于贷款要求时才是非0，表示道歉账户需要追加抵押品的价值
     function getHypotheticalAccountLiquidityInternal(
         address account,
         CToken cTokenModify,
@@ -1025,14 +1054,14 @@ contract Comptroller is
         if (vars.sumCollateral > vars.sumBorrowPlusEffects) {
             return (
                 Error.NO_ERROR,
-                vars.sumCollateral - vars.sumBorrowPlusEffects,
+                vars.sumCollateral - vars.sumBorrowPlusEffects, // 账户抵押品价值的冗余度
                 0
             );
         } else {
             return (
                 Error.NO_ERROR,
                 0,
-                vars.sumBorrowPlusEffects - vars.sumCollateral
+                vars.sumBorrowPlusEffects - vars.sumCollateral // 抵押品不足，需要补充的抵押品数量
             );
         }
     }
@@ -1045,17 +1074,31 @@ contract Comptroller is
      * @param actualRepayAmount The amount of cTokenBorrowed underlying to convert into cTokenCollateral tokens
      * @return (errorCode, number of cTokenCollateral tokens to be seized in a liquidation)
      */
+    // 返回值：清算者应该获得多少CToken
+    // 清算者还的是actualRepayAmount个Token，比如清算者还一个Token时应该获取X个CToken
+    // 清算者最终获得：actualRepayAmount * X 个CToken
+    // 1.08 * (priceBorrowedMantissa * 1 / exchangeRateMantissa) / priceCollateralMantissa
+    // 1.08 是一个合约的系数，清算者额外获得8%的收益；
+    // priceBorrowedMantissa: 比如借款的是Token，该值是借款对应的CToken值多少钱
+    // 1 / exchangeRateMantissa: 表示一个Token值多少CToken，将借款Token，等价转换为借了多少个CToken
+    // priceCollateralMantissa: 一个cTokenCollateral CToken抵押品的价值
+
+    // 不如A替B清算，A 替B还款 100 Token，A需要获得 cTokenCollateral 这种抵押品作为回报
+    // A替B还款100 Token，A 最终获得价值 108 Token的cTokenCollateral 资产
     function liquidateCalculateSeizeTokens(
-        address cTokenBorrowed,
-        address cTokenCollateral,
-        uint actualRepayAmount
+        address cTokenBorrowed, // B 借的资产
+        address cTokenCollateral, // A 希望获得这种资产作为回报
+        uint actualRepayAmount // A 替 B还款了 actualRepayAmount个cTokenBorrowed
     ) external view override returns (uint, uint) {
         /* Read oracle prices for borrowed and collateral markets */
+        // 还款代币的价值，这里是CToken的价值
+        // 比如质押CUSDT，贷款DAI，贷款贷的都是Token，还款也是还Token，抵押品都是CToken
+        // 在计算清算多少抵押品时，统一到Token上，因为还款还的是token
         uint priceBorrowedMantissa = oracle.getUnderlyingPrice(
             CToken(cTokenBorrowed)
         );
         uint priceCollateralMantissa = oracle.getUnderlyingPrice(
-            CToken(cTokenCollateral)
+            CToken(cTokenCollateral) // 抵押品的价值，这里也是CToken的价值
         );
         if (priceBorrowedMantissa == 0 || priceCollateralMantissa == 0) {
             return (uint(Error.PRICE_ERROR), 0);
@@ -1067,6 +1110,8 @@ contract Comptroller is
          *  seizeTokens = seizeAmount / exchangeRate
          *   = actualRepayAmount * (liquidationIncentive * priceBorrowed) / (priceCollateral * exchangeRate)
          */
+        //  一个CToken值多少Token，因为贷款的事Token，还款的也是Token
+        // 这里需要计算还款金额对应多少CToken
         uint exchangeRateMantissa = CToken(cTokenCollateral)
             .exchangeRateStored(); // Note: reverts on error
         uint seizeTokens;
@@ -1074,16 +1119,27 @@ contract Comptroller is
         Exp memory denominator;
         Exp memory ratio;
 
+        // 清算获利单价，清算获得的资产价值：actualRepayAmount * numerator
         numerator = mul_(
-            Exp({mantissa: liquidationIncentiveMantissa}),
-            Exp({mantissa: priceBorrowedMantissa})
+            Exp({mantissa: liquidationIncentiveMantissa}), // liquidationIncentiveMantissa： 1.08，108%
+            Exp({mantissa: priceBorrowedMantissa}) // 贷款资产的价值
         );
+        // 抵押品的价值，一个抵押品值多少Token，抵押品值compound 中都是CToken，因为compound中是存入Token，获得Ctoken
+        // CToken 作为资产可以抵押借贷
+        // denominator：一个抵押品CToken
         denominator = mul_(
             Exp({mantissa: priceCollateralMantissa}),
             Exp({mantissa: exchangeRateMantissa})
         );
+        // 1.08 * priceBorrowedMantissa  / (priceCollateralMantissa * exchangeRateMantissa)
+        // 1.08 * (priceBorrowedMantissa * 1 / exchangeRateMantissa) / priceCollateralMantissa
+        // 1.08 是一个合约的系数，清算者额外获得8%的收益；
+        // priceBorrowedMantissa: 比如借款的是Token，该值是借款对应的CToken值多少钱
+        // 1 / exchangeRateMantissa: 表示一个Token值多少CToken，将借款Token，等价转换为借了多少个CToken
+        // priceCollateralMantissa: 一个cTokenCollateral CToken抵押品的价值
         ratio = div_(numerator, denominator);
-
+        
+        // 清算者支付了actualRepayAmount个cTokenBorrowed，应该获得seizeTokens个cTokenCollateral类型的CToken
         seizeTokens = mul_ScalarTruncate(ratio, actualRepayAmount);
 
         return (uint(Error.NO_ERROR), seizeTokens);

@@ -96,7 +96,6 @@ contract CTokenStorage {
      * @notice Total amount of reserves of the underlying held in this market
      */
     // 当前市场合约本身总共持有的Token数量, 用户贷款利息的一个固定比例会累计到这里
-    // 
     uint public totalReserves;
 
     /**

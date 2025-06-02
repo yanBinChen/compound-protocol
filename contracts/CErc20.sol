@@ -103,6 +103,7 @@ contract CErc20 is CToken, CErc20Interface {
      * @param repayAmount The amount to repay, or -1 for the full outstanding amount
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    //  贷款后的还款
     function repayBorrow(uint repayAmount) external override returns (uint) {
         repayBorrowInternal(repayAmount);
         return NO_ERROR;
@@ -114,6 +115,7 @@ contract CErc20 is CToken, CErc20Interface {
      * @param repayAmount The amount to repay, or -1 for the full outstanding amount
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    // 替别人还款
     function repayBorrowBehalf(
         address borrower,
         uint repayAmount
@@ -130,6 +132,21 @@ contract CErc20 is CToken, CErc20Interface {
      * @param cTokenCollateral The market in which to seize collateral from the borrower
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    //  清算：B的抵押品不满足抵押要求，这时A调用当前接口对B进行清算。
+    // 比如B贷款了1000 USDT, 要求1.5被质押也就是当B的质押品价格低于1500 USDT时，即可对B进行清算
+    // 清算时，A 替 B最多还50%的借贷，50%是协议规定单次最多清算的资产比例。即A替B还 500 USDT
+    // A 替B清算必定是因为A有利可图，比如替B还500 USDT后，A可以获得B价值 500 * 1.08的抵押品
+    // 即A替B清算可以立即获得8%的额外收益，8%这个参数也是合约规定的
+
+    // 在 Compound 协议中，用户存入资产（如 DAI、USDT）到 cToken 合约（如 cDAI、cUSDT）后，会收到对应的 cToken（例如存入 DAI 得到 cDAI）。
+    // cToken 代表用户在协议中的存款权益（包括本金和累积的利息），并作为抵押品用于借贷。
+    // 当用户借款时，协议要求用户提供抵押品，而这些抵押品以 cToken 的形式存储在用户的账户中（由 Comptroller 管理）。
+    // cTokenCollateral 参数表示的是清算后你希望获得哪种代币。比如被清算的用户可能有很多种抵押CToken
+    // cTokenCollateral 参数是清算人希望从你的账户中获取的 cToken 抵押品地址。
+
+    // 部分场景可能是多种CToken作为抵押品，liquidateBorrow 一次只能处理一种 cToken，
+    // 可以选择多次调用 liquidateBorrow，每次针对不同的 cToken，直到账户不再可清算。
+    // 如果清算repayAmount后，账户没有足够的CToken支付给清算者奖励，则此次清算会失败
     function liquidateBorrow(
         address borrower,
         uint repayAmount,
@@ -143,16 +160,38 @@ contract CErc20 is CToken, CErc20Interface {
      * @notice A public function to sweep accidental ERC-20 transfers to this contract. Tokens are sent to admin (timelock)
      * @param token The address of the ERC-20 token to sweep
      */
+    // 该函数允许合约的管理员（通常是一个 timelock 合约）提取（“清扫”）意外转入该合约的 ERC-20 代币。这些代币可能是用户或合约误操作发送到该合约的。
+    // 比如用户转账时输错了钱包地址，转账转到了当前合约账户
+    // 功能：将指定 ERC-20 代币的余额从合约地址转移到管理员地址。
+    // 限制：
+    //     只有管理员（admin）可以调用此函数，确保只有授权实体能操作。
+    //     不能清扫合约的底层资产代币（underlying），以保护合约的核心功能。比如转了一些DAI到CUSDT合约，可以提供当前函数将DAI转出
     function sweepToken(EIP20NonStandardInterface token) external override {
         require(
             msg.sender == admin,
             "CErc20::sweepToken: only admin can sweep tokens"
         );
         require(
-            address(token) != underlying,
+            address(token) != underlying, // 当前合约的代币不能转出，比如不能转出CUSDT合约的USDT资产
             "CErc20::sweepToken: can not sweep underlying token"
         );
+        // 比如当前是CUSDT合约，下面是获取token这个合约中CUSDT合约地址的余额（比如其他用户误往当前账户转入了代币）
+        // 下面这个是将
         uint256 balance = token.balanceOf(address(this));
+        // 在以太坊中，msg.sender 表示直接调用当前函数的账户或合约地址。
+        // 在调用链 C → A → B 中
+        // 合约 C 调用合约 A 的某个函数时，A 合约中的 msg.sender 是 C 的地址（可能是外部账户或合约）。
+        // 当 A 合约调用 B 合约的函数时，B 合约中的 msg.sender 是 A 的地址，因为 A 是直接调用 B 的实体。
+
+        // C调用CUSDT合约的sweepToken函数， sweepToken函数内部调用了token.transfer(admin, balance);）
+        // transfer内部获得的msg.sender是当前合约地址，而不是C的地址
+        // 也就是这里的逻辑是获取当前合约地址在token合约下的余额，
+        // 将所有余额转到admin地址
+        // CUSDT合约地址：addr1, admin 地址：addr2
+        // token对应的合约内部有个保存各个地址余额的函数：accountTokens[addr1] -= balance
+        // accountTokens[addr2] += balance
+
+        // 按照预期，CUSDT合约地址不会在任何一种代币的accountTokens下有余额，除非是用户错误转账
         token.transfer(admin, balance);
     }
 
@@ -161,6 +200,7 @@ contract CErc20 is CToken, CErc20Interface {
      * @param addAmount The amount fo underlying token to add as reserves
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
+    //  加上当前是CUSDT合约，这个函数就是将sender地址的addAmount 个USDT转账到CUSDT合约，并更新合约的totalReserves
     function _addReserves(uint addAmount) external override returns (uint) {
         return _addReservesInternal(addAmount);
     }
@@ -172,6 +212,11 @@ contract CErc20 is CToken, CErc20Interface {
      * @dev This excludes the value of the current message, if any
      * @return The quantity of underlying tokens owned by this contract
      */
+    // 合约底层资产数量：
+    // 用户存入的资金。
+    // 已还款用户部分的利息。
+    // 合约的储备金（reserve）。
+    // 可能包含意外转入的底层资产（如果存在）。
     function getCashPrior() internal view virtual override returns (uint) {
         EIP20Interface token = EIP20Interface(underlying);
         return token.balanceOf(address(this));
@@ -282,6 +327,7 @@ contract CErc20 is CToken, CErc20Interface {
      *      Note: This wrapper safely handles non-standard ERC-20 tokens that do not return a value.
      *            See here: https://medium.com/coinmonks/missing-return-value-bug-at-least-130-tokens-affected-d67bf08521ca
      */
+    //  将当前合约的底层资产转账amount个Token到指定地址
     function doTransferOut(
         address payable to,
         uint amount
